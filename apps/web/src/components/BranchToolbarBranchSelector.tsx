@@ -131,6 +131,9 @@ export function BranchToolbarBranchSelector({
   const createRefMutation = useAtomCommand(vcsEnvironment.createRef, {
     reportFailure: false,
   });
+  const createWorktree = useAtomCommand(vcsEnvironment.createWorktree, {
+    reportFailure: false,
+  });
   const threadRef = scopeThreadRef(environmentId, threadId);
   const serverThread = useQuietThreadShell(threadRef);
   const serverSession = serverThread?.runtime ?? null;
@@ -214,6 +217,7 @@ export function BranchToolbarBranchSelector({
   };
 
   const [isBranchMenuOpen, setIsBranchMenuOpen] = useState(false);
+  const [checkoutSelectedBranch, setCheckoutSelectedBranch] = useState(false);
   const [branchQuery, setBranchQuery] = useState("");
 
   const branchStatusQuery = useEnvironmentQuery(
@@ -386,6 +390,11 @@ export function BranchToolbarBranchSelector({
   const selectBranch = (refName: VcsRef) => {
     if (!canUpdateThreadBranch || !branchCwd || !activeProjectCwd || isBranchActionPending) return;
 
+    if (isSelectingWorktreeBase && checkoutSelectedBranch && !forceNewWorktree) {
+      checkoutBranchInNewWorktree(refName);
+      return;
+    }
+
     if (isSelectingWorktreeBase) {
       setThreadBranch(refName.name, null);
       setIsBranchMenuOpen(false);
@@ -439,6 +448,58 @@ export function BranchToolbarBranchSelector({
             type: "error",
             title: "Failed to switch ref.",
             description: toBranchActionErrorMessage(squashAtomCommandFailure(checkoutResult)),
+          }),
+        );
+      }
+    });
+  };
+
+  const checkoutBranchInNewWorktree = (refName: VcsRef) => {
+    if (!activeProjectCwd) return;
+    setIsBranchMenuOpen(false);
+    onComposerFocusRequest?.();
+
+    if (refName.worktreePath) {
+      const target = resolveBranchSelectionTarget({
+        activeProjectCwd,
+        activeProjectCheckoutRoot,
+        activeWorktreePath: null,
+        refName,
+      });
+      if (target.nextWorktreePath !== null) {
+        setThreadBranch(refName.name, target.nextWorktreePath);
+        return;
+      }
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: `${refName.name} is checked out in the project folder`,
+          description:
+            "Git allows a branch in one checkout at a time. Switch the project folder to another branch, or use Current checkout.",
+        }),
+      );
+      return;
+    }
+
+    // Git creates a tracking branch for a remote-only name.
+    const branchName = refName.isRemote
+      ? deriveLocalBranchNameFromRemoteRef(refName.name)
+      : refName.name;
+    runBranchAction(async () => {
+      const result = await createWorktree({
+        environmentId,
+        input: { cwd: activeProjectCwd, refName: branchName, path: null },
+      });
+      if (result._tag === "Success") {
+        setThreadBranch(result.value.worktree.refName, result.value.worktree.path);
+        return;
+      }
+      if (!isAtomCommandInterrupted(result)) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Failed to create worktree.",
+            description: toBranchActionErrorMessage(squashAtomCommandFailure(result)),
           }),
         );
       }
@@ -674,6 +735,11 @@ export function BranchToolbarBranchSelector({
       originControl={
         isSelectingWorktreeBase
           ? { checked: startFromOrigin, onCheckedChange: onStartFromOriginChange }
+          : undefined
+      }
+      checkoutControl={
+        isSelectingWorktreeBase && !forceNewWorktree
+          ? { checked: checkoutSelectedBranch, onCheckedChange: setCheckoutSelectedBranch }
           : undefined
       }
       popupProps={{

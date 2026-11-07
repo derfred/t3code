@@ -13,6 +13,12 @@ your model and mode selections, unless the destination project has its own model
 Its branch and workspace mode come from your configured defaults. To continue in
 an existing worktree, use **New thread in this worktree** from the branch toolbar.
 
+A new worktree normally starts a new branch from the base branch you pick. To keep
+working on an existing branch instead, turn on **Work on selected branch** in the
+base branch picker and pick the branch. T3 Code checks it out in a new worktree, so
+commits and pushes go to that branch. Git allows a branch in only one checkout at a
+time, so switch your project folder off that branch first.
+
 On mobile, **New thread** starts in the current thread's project, or else in the
 last project you opened or chose on that device. If neither is available, the
 project picker opens. Turn off **Settings → General → Use last project** to

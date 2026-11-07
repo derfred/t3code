@@ -1,4 +1,5 @@
 import type { VcsRef } from "@t3tools/contracts";
+import { GitBranchIcon } from "lucide-react";
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
 import { useId, useRef, useState, type ComponentProps, type ReactNode } from "react";
 
@@ -34,6 +35,7 @@ export function BranchPicker({
   onLoadNext,
   statusText,
   originControl,
+  checkoutControl,
   popupProps,
   renderItem,
   getItemType,
@@ -52,6 +54,7 @@ export function BranchPicker({
   onLoadNext: () => void;
   statusText: string | null;
   originControl?: { checked: boolean; onCheckedChange: (checked: boolean) => void } | undefined;
+  checkoutControl?: { checked: boolean; onCheckedChange: (checked: boolean) => void } | undefined;
   popupProps: Omit<ComponentProps<typeof ComboboxPopup>, "children">;
   renderItem: (value: string, index: number) => ReactNode;
   getItemType?: ((value: string) => string) | undefined;
@@ -59,6 +62,7 @@ export function BranchPicker({
 }) {
   const highlightedValueRef = useRef<string | null>(null);
   const startFromOriginSwitchId = useId();
+  const checkoutBranchSwitchId = useId();
   const branchListScrollElementRef = useRef<HTMLElement | null>(null);
   const previousBranchListScrollTopRef = useRef<number | null>(null);
   const handleOpenChange = (nextOpen: boolean) => {
@@ -203,7 +207,37 @@ export function BranchPicker({
               />
             </ComboboxListVirtualized>
           </div>
-          {originControl ? (
+          {checkoutControl ? (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <label
+                    htmlFor={checkoutBranchSwitchId}
+                    className="flex cursor-pointer items-center justify-between gap-3 border-t border-border/60 px-3 py-2 text-xs"
+                  >
+                    <span className="flex min-w-0 items-center gap-1.5 font-medium text-muted-foreground">
+                      <GitBranchIcon aria-hidden="true" className="size-3 shrink-0" />
+                      <span className="truncate">Work on selected branch</span>
+                    </span>
+                    <Switch
+                      id={checkoutBranchSwitchId}
+                      checked={checkoutControl.checked}
+                      size="sm"
+                      aria-label="Work on the selected branch in a new worktree"
+                      onCheckedChange={(checked) =>
+                        checkoutControl.onCheckedChange(Boolean(checked))
+                      }
+                    />
+                  </label>
+                }
+              />
+              <TooltipPopup side="top" className="max-w-72 whitespace-normal">
+                Checks out the branch you pick in a new worktree, so commits and pushes go to that
+                branch. Otherwise the worktree starts a new branch from it.
+              </TooltipPopup>
+            </Tooltip>
+          ) : null}
+          {originControl && !checkoutControl?.checked ? (
             <Tooltip>
               <TooltipTrigger
                 render={
