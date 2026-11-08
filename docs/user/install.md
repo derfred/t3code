@@ -149,6 +149,26 @@ Pass a path, such as `t3 app ../my-project`, to open another directory. It requi
 the desktop app, so a standalone server or an SSH session is not enough. If the
 command cannot reach the app, start or update the desktop app and try again.
 
+### Manage projects from a file
+
+To keep a server's projects in version control, for example with GitOps tooling, list them in a
+YAML or JSON manifest. Relative paths are relative to the manifest:
+
+```yaml
+schemaVersion: 1
+projects:
+  - path: /srv/repos/api
+    title: API
+  - path: /srv/repos/web
+```
+
+`t3 project apply projects.yaml` adds the missing projects and renames any whose `title` differs.
+An entry without a `title` is named once, when it is added, and later renames from the app stick.
+Running it again changes nothing. Add `--prune` to remove projects the manifest does not list;
+a project with threads is only removed with `--force`, which deletes its threads too. Add
+`--dry-run` to see the changes first. `t3 project list` prints the current projects. Both work
+whether the server is running or not.
+
 ## Mobile app
 
 Install T3 Code from the

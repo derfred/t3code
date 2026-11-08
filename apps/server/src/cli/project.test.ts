@@ -134,6 +134,57 @@ it.effect("adds, renames, and removes projects through the V2 project CLI domain
   }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
+it.effect("applies a project manifest idempotently, pruning only when asked", () =>
+  Effect.gen(function* () {
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-v2-project-apply-"));
+    const baseDir = NodePath.join(root, "state");
+    for (const name of ["kept", "added", "stray"]) {
+      NodeFS.mkdirSync(NodePath.join(root, name));
+    }
+    const manifestPath = NodePath.join(root, "projects.yaml");
+    NodeFS.writeFileSync(
+      manifestPath,
+      [
+        "schemaVersion: 1",
+        "projects:",
+        "  - path: kept",
+        "    title: Kept",
+        "  - path: added",
+      ].join("\n"),
+    );
+    const rows = () =>
+      readProjects(baseDir).pipe(
+        Effect.map((snapshot) =>
+          snapshot.projects
+            .map((project) => `${NodePath.basename(project.workspaceRoot)}:${project.title}`)
+            .toSorted(),
+        ),
+      );
+
+    const at = (name: string) => NodePath.join(root, name);
+    yield* runCli(["project", "add", at("kept"), "--title", "Old", "--base-dir", baseDir]);
+    yield* runCli(["project", "add", at("stray"), "--base-dir", baseDir]);
+
+    yield* runCli([
+      "project",
+      "apply",
+      manifestPath,
+      "--prune",
+      "--dry-run",
+      "--base-dir",
+      baseDir,
+    ]);
+    assert.deepEqual(yield* rows(), ["kept:Old", "stray:stray"]);
+
+    yield* runCli(["project", "apply", manifestPath, "--base-dir", baseDir]);
+    assert.deepEqual(yield* rows(), ["added:added", "kept:Kept", "stray:stray"]);
+
+    yield* runCli(["project", "rename", at("added"), "Renamed in UI", "--base-dir", baseDir]);
+    yield* runCli(["project", "apply", manifestPath, "--prune", "--base-dir", baseDir]);
+    assert.deepEqual(yield* rows(), ["added:Renamed in UI", "kept:Kept"]);
+  }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+);
+
 it.effect.each(["snapshot", "mutation"] as const)(
   "waits for a busy live server's %s response",
   (slowRequest) =>

@@ -20,6 +20,7 @@ import * as Schema from "effect/Schema";
 import { Argument, Command, Flag, GlobalFlag } from "effect/cli";
 import { FetchHttpClient, HttpClient, HttpClientError } from "effect/http";
 import * as HttpApiClient from "effect/http-api/HttpApiClient";
+import { parse as parseYaml } from "yaml";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
@@ -43,6 +44,13 @@ import {
 } from "../serverRuntimeState.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { type CliAuthLocationFlags, projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
+import {
+  type DesiredProject,
+  describeProjectApplyAction,
+  planProjectApply,
+  type ProjectApplyAction,
+  ProjectManifest,
+} from "./projectApply.ts";
 
 type ProjectMutationTarget = {
   readonly id: ProjectId;
@@ -158,6 +166,45 @@ export class ProjectAlreadyExistsError extends Schema.TaggedError<ProjectAlready
   }
 }
 
+export class ProjectManifestReadError extends Schema.TaggedError<ProjectManifestReadError>()(
+  "ProjectManifestReadError",
+  {
+    operation: Schema.Literal("readProjectManifest"),
+    manifestPath: Schema.String,
+    cause: Schema.Defect(),
+  },
+) {
+  override get message(): string {
+    return `Failed to read project manifest '${this.manifestPath}'.`;
+  }
+}
+
+export class ProjectManifestInvalidError extends Schema.TaggedError<ProjectManifestInvalidError>()(
+  "ProjectManifestInvalidError",
+  {
+    operation: Schema.Literal("decodeProjectManifest"),
+    manifestPath: Schema.String,
+    detail: Schema.String,
+    cause: Schema.Defect(),
+  },
+) {
+  override get message(): string {
+    return `Invalid project manifest '${this.manifestPath}': ${this.detail}`;
+  }
+}
+
+export class ProjectManifestDuplicatePathError extends Schema.TaggedError<ProjectManifestDuplicatePathError>()(
+  "ProjectManifestDuplicatePathError",
+  {
+    operation: Schema.Literal("decodeProjectManifest"),
+    workspaceRoot: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Project manifest lists '${this.workspaceRoot}' more than once.`;
+  }
+}
+
 export const ProjectCommandError = Schema.Union([
   ProjectCommandIdGenerationError,
   ProjectLiveServerDeclaredResponseError,
@@ -167,6 +214,9 @@ export const ProjectCommandError = Schema.Union([
   ProjectIdentifierEmptyError,
   ProjectNotFoundError,
   ProjectAlreadyExistsError,
+  ProjectManifestReadError,
+  ProjectManifestInvalidError,
+  ProjectManifestDuplicatePathError,
 ]);
 export type ProjectCommandError = typeof ProjectCommandError.Type;
 
@@ -593,7 +643,178 @@ const projectRenameCommand = Command.make("rename", {
   ),
 );
 
+const projectListCommand = Command.make("list", projectLocationFlags).pipe(
+  Command.withDescription("List projects as tab-separated id, title, and workspace root."),
+  Command.withHandler((flags) =>
+    runProjectMutation(flags, ({ snapshot }) =>
+      Effect.succeed(
+        snapshot.projects
+          .filter((project) => project.deletedAt === null)
+          .map(
+            (project) =>
+              `${project.id}\t${project.title}\t${project.workspaceRoot}${
+                project.archivedAt ? "\tarchived" : ""
+              }`,
+          )
+          .join("\n") || "No projects.",
+      ),
+    ),
+  ),
+);
+
+const decodeProjectManifest = Schema.decodeUnknownEffect(ProjectManifest);
+
+const readProjectManifest = Effect.fn("readProjectManifest")(function* (manifestPath: string) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const text = yield* fileSystem
+    .readFileString(manifestPath)
+    .pipe(
+      Effect.mapError(
+        (cause) =>
+          new ProjectManifestReadError({ operation: "readProjectManifest", manifestPath, cause }),
+      ),
+    );
+  const invalid = (detail: string, cause: unknown) =>
+    new ProjectManifestInvalidError({
+      operation: "decodeProjectManifest",
+      manifestPath,
+      detail,
+      cause,
+    });
+  const parsed = yield* Effect.try({
+    try: () => parseYaml(text) as unknown,
+    catch: (cause) => invalid(cause instanceof Error ? cause.message : "not YAML or JSON", cause),
+  });
+  return yield* decodeProjectManifest(parsed).pipe(
+    Effect.mapError((cause) => invalid(cause.message, cause)),
+  );
+});
+
+const resolveDesiredProjects = Effect.fn("resolveDesiredProjects")(function* (
+  manifestPath: string,
+  manifest: ProjectManifest,
+) {
+  const path = yield* Path.Path;
+  const manifestDir = path.dirname(path.resolve(manifestPath));
+  const desired: Array<DesiredProject> = [];
+  for (const entry of manifest.projects) {
+    // Relative entries are relative to the manifest, so one checked-in file works from any cwd.
+    const rawRoot =
+      path.isAbsolute(entry.path) || entry.path.startsWith("~")
+        ? entry.path
+        : path.join(manifestDir, entry.path);
+    const workspaceRoot = yield* normalizeWorkspaceRootForProjectCommand(rawRoot);
+    if (desired.some((existing) => existing.workspaceRoot === workspaceRoot)) {
+      return yield* new ProjectManifestDuplicatePathError({
+        operation: "decodeProjectManifest",
+        workspaceRoot,
+      });
+    }
+    desired.push({
+      workspaceRoot,
+      title: entry.title,
+      defaultTitle: yield* resolveProjectTitle(workspaceRoot),
+    });
+  }
+  return desired;
+});
+
+const projectApplyMutation = Effect.fn("projectApplyMutation")(function* (
+  action: ProjectApplyAction,
+  force: boolean,
+) {
+  const commandId = CommandId.make(yield* projectCommandUuid);
+  switch (action.kind) {
+    case "add":
+      return {
+        type: "project.create",
+        commandId,
+        projectId: ProjectId.make(yield* projectCommandUuid),
+        title: action.title,
+        workspaceRoot: action.workspaceRoot,
+      } satisfies ProjectCliDispatchCommand;
+    case "rename":
+      return {
+        type: "project.update",
+        commandId,
+        projectId: action.project.id,
+        title: action.title,
+      } satisfies ProjectCliDispatchCommand;
+    case "remove":
+      return {
+        type: "project.delete",
+        commandId,
+        projectId: action.project.id,
+        force,
+      } satisfies ProjectCliDispatchCommand;
+  }
+});
+
+const projectApplyCommand = Command.make("apply", {
+  ...projectLocationFlags,
+  manifest: Argument.String("manifest").pipe(
+    Argument.withDescription(
+      "YAML or JSON file listing the projects this environment should have.",
+    ),
+  ),
+  prune: Flag.Boolean("prune").pipe(
+    Flag.withDescription("Remove projects the manifest does not list."),
+    Flag.withDefault(false),
+  ),
+  force: Flag.Boolean("force").pipe(
+    Flag.withDescription(
+      "With --prune, also remove projects that have threads, and their threads.",
+    ),
+    Flag.withDefault(false),
+  ),
+  dryRun: Flag.Boolean("dry-run").pipe(
+    Flag.withDescription("Print the changes without making them."),
+    Flag.withDefault(false),
+  ),
+}).pipe(
+  Command.withDescription("Make this environment's projects match a manifest."),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      // Validate before touching the server so a bad manifest changes nothing.
+      const manifest = yield* readProjectManifest(flags.manifest);
+      return yield* runProjectMutation(
+        flags,
+        Effect.fn("projectApply")(function* ({ snapshot, dispatch }) {
+          const desired = yield* resolveDesiredProjects(flags.manifest, manifest);
+          const actions = planProjectApply({
+            projects: snapshot.projects,
+            desired,
+            prune: flags.prune,
+          });
+          if (actions.length === 0) {
+            return "Projects match the manifest.";
+          }
+          const lines: Array<string> = [];
+          for (const action of actions) {
+            if (!flags.dryRun) {
+              yield* dispatch(yield* projectApplyMutation(action, flags.force));
+            }
+            lines.push(describeProjectApplyAction(action));
+          }
+          lines.push(
+            `${flags.dryRun ? "Would apply" : "Applied"} ${actions.length} change${
+              actions.length === 1 ? "" : "s"
+            }.`,
+          );
+          return lines.join("\n");
+        }),
+      );
+    }),
+  ),
+);
+
 export const projectCommand = Command.make("project").pipe(
   Command.withDescription("Manage projects."),
-  Command.withSubcommands([projectAddCommand, projectRemoveCommand, projectRenameCommand]),
+  Command.withSubcommands([
+    projectAddCommand,
+    projectRemoveCommand,
+    projectRenameCommand,
+    projectListCommand,
+    projectApplyCommand,
+  ]),
 );
