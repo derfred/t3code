@@ -42,7 +42,10 @@ import * as EnvironmentAuthPolicy from "./EnvironmentAuthPolicy.ts";
 import * as PairingGrantStore from "./PairingGrantStore.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 import * as SessionStore from "./SessionStore.ts";
-import { REUSABLE_DEV_SESSION_EXPIRES_AT, resolveReusableDevAuth } from "./ReusableDevAuth.ts";
+import {
+  CONFIGURED_SESSION_EXPIRES_AT,
+  resolveReusableDevAuth,
+} from "./ConfiguredSessionTokens.ts";
 import { verifyRequestDpopProof } from "./dpop.ts";
 import { DESKTOP_RENDERER_ORIGINS } from "../httpCors.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -1176,7 +1179,7 @@ export const make = Effect.gen(function* () {
               id: session.sessionId,
               credential: devAuth.credential,
               label: "Reusable dev token",
-              expiresAt: DateTime.toUtc(session.expiresAt ?? REUSABLE_DEV_SESSION_EXPIRES_AT),
+              expiresAt: DateTime.toUtc(session.expiresAt ?? CONFIGURED_SESSION_EXPIRES_AT),
             }) satisfies AuthPairingCredentialResult,
         ),
         Effect.catch((cause) =>

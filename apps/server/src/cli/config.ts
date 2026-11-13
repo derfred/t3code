@@ -61,6 +61,12 @@ const bootstrapFdFlag = Flag.Int("bootstrap-fd").pipe(
   Flag.withDescription("Read one-time bootstrap secrets from the given file descriptor."),
   Flag.optional,
 );
+const authTokenFileFlag = Flag.String("auth-token-file").pipe(
+  Flag.withDescription(
+    "File holding a bearer token (at least 32 characters) that API clients such as a Kubernetes operator can use; read at startup (equivalent to T3CODE_AUTH_TOKEN_FILE).",
+  ),
+  Flag.optional,
+);
 const autoBootstrapProjectFromCwdFlag = Flag.Boolean("auto-bootstrap-project-from-cwd").pipe(
   Flag.withDescription(
     "Create a project for the current working directory on startup when missing.",
@@ -151,6 +157,10 @@ const EnvServerConfig = Config.all({
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
+  authTokenFile: Config.String("T3CODE_AUTH_TOKEN_FILE").pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ),
   bootstrapFd: Config.Int("T3CODE_BOOTSTRAP_FD").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
@@ -194,6 +204,28 @@ const DevAuthTokenConfig = Config.Redacted("T3CODE_DEV_AUTH_TOKEN").pipe(
   Config.map(Option.getOrUndefined),
 );
 
+const MIN_AUTH_TOKEN_LENGTH = 32;
+
+const readAuthTokenFile = Effect.fn("config.readAuthTokenFile")(function* (filePath: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const resolvedPath = yield* expandHomePath(filePath.trim());
+  const token = yield* fs.readFileString(resolvedPath).pipe(
+    Effect.map((contents) => contents.trim()),
+    Effect.mapError(
+      (cause) =>
+        new CliError.UserError({
+          cause: `Cannot read the auth token file ${resolvedPath}: ${cause.message}`,
+        }),
+    ),
+  );
+  if (token.length < MIN_AUTH_TOKEN_LENGTH) {
+    return yield* new CliError.UserError({
+      cause: `The auth token in ${resolvedPath} must contain at least ${MIN_AUTH_TOKEN_LENGTH} characters.`,
+    });
+  }
+  return Redacted.make(token);
+});
+
 export interface CliServerFlags {
   readonly mode: Option.Option<ServerConfig.RuntimeMode>;
   readonly port: Option.Option<number>;
@@ -203,6 +235,7 @@ export interface CliServerFlags {
   readonly devUrl: Option.Option<URL>;
   readonly noBrowser: Option.Option<boolean>;
   readonly bootstrapFd: Option.Option<number>;
+  readonly authTokenFile: Option.Option<string>;
   readonly autoBootstrapProjectFromCwd: Option.Option<boolean>;
   readonly logWebSocketEvents: Option.Option<boolean>;
   readonly tailscaleServeEnabled: Option.Option<boolean>;
@@ -238,6 +271,7 @@ export const sharedServerCommandFlags = {
   devUrl: devUrlFlag,
   noBrowser: noBrowserFlag,
   bootstrapFd: bootstrapFdFlag,
+  authTokenFile: authTokenFileFlag,
   autoBootstrapProjectFromCwd: autoBootstrapProjectFromCwdFlag,
   logWebSocketEvents: logWebSocketEventsFlag,
   tailscaleServeEnabled: tailscaleServeFlag,
@@ -286,6 +320,7 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
     devUrl: flags.devUrl ?? Option.none(),
     noBrowser: flags.noBrowser ?? Option.none(),
     bootstrapFd: flags.bootstrapFd ?? Option.none(),
+    authTokenFile: flags.authTokenFile ?? Option.none(),
     autoBootstrapProjectFromCwd: flags.autoBootstrapProjectFromCwd ?? Option.none(),
     logWebSocketEvents: flags.logWebSocketEvents ?? Option.none(),
     tailscaleServeEnabled: flags.tailscaleServeEnabled ?? Option.none(),
@@ -330,6 +365,13 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
   );
   const devAuthToken =
     mode === "web" && devUrl !== undefined ? yield* DevAuthTokenConfig : undefined;
+  const authTokenFile = resolveOptionPrecedence(
+    normalizedFlags.authTokenFile,
+    Option.fromUndefinedOr(env.authTokenFile),
+  ).pipe(Option.filter((value) => value.trim().length > 0));
+  const authToken = Option.isSome(authTokenFile)
+    ? yield* readAuthTokenFile(authTokenFile.value)
+    : undefined;
   const explicitBaseDir = resolveOptionPrecedence(
     normalizedFlags.baseDir,
     Option.fromUndefinedOr(env.t3Home),
@@ -509,6 +551,7 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
     staticDir,
     devUrl,
     ...(devAuthToken === undefined ? {} : { devAuthToken }),
+    ...(authToken === undefined ? {} : { authToken }),
     devAllowedOrigins: env.devAllowedOrigins,
     noBrowser,
     startupPresentation,
@@ -545,6 +588,7 @@ export const resolveCliAuthConfig = (
       devUrl: flags.devUrl ?? Option.none(),
       noBrowser: Option.none(),
       bootstrapFd: Option.none(),
+      authTokenFile: Option.none(),
       autoBootstrapProjectFromCwd: Option.none(),
       logWebSocketEvents: Option.none(),
       tailscaleServeEnabled: Option.none(),

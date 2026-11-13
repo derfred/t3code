@@ -391,6 +391,13 @@ A terminal or a full-access agent on the host can reach those as well, so a
 client that should not manage access also needs to go without `terminal:operate`
 and `orchestration:operate`.
 
+For a headless deployment, such as a container managed by Kubernetes, start the
+server with `--auth-token-file <path>` or `T3CODE_AUTH_TOKEN_FILE=<path>`. The
+file holds a secret of at least 32 characters, read at startup. Clients send it
+as `Authorization: Bearer <token>` and get every standard permission. It is listed
+as **Configured auth token** with your other sessions. Revoking it there lasts
+until you put a new value in the file and restart.
+
 To change an existing client's permissions, create a fresh pairing link with the
 scopes it needs. In a browser opened directly on the environment, open that link
 to replace the browser's current grant. For mobile or a saved remote environment

@@ -61,6 +61,7 @@ const relaySessionInput = {
 const makeDiskSessionStoreLayer = Effect.fn("makeDiskSessionStoreLayer")(function* (
   baseDir: string,
   token?: string,
+  tokenField: "devAuthToken" | "authToken" = "devAuthToken",
 ) {
   const devUrl = new URL("http://127.0.0.1:5173");
   const paths = yield* ServerConfig.deriveServerPaths(baseDir, devUrl, {
@@ -78,7 +79,7 @@ const makeDiskSessionStoreLayer = Effect.fn("makeDiskSessionStoreLayer")(functio
         baseDir,
         mode: "web",
         devUrl,
-        ...(token === undefined ? {} : { devAuthToken: Redacted.make(token) }),
+        ...(token === undefined ? {} : { [tokenField]: Redacted.make(token) }),
       }),
     ),
   );
@@ -298,51 +299,53 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("SessionStore.lay
     }),
   );
 
-  it.effect("invalidates old dev credentials and tickets after rotation or removal", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-dev-auth-rotation-" });
-      const oldToken = "old-reusable-dev-auth-token-that-is-long-enough";
-      const newToken = "new-reusable-dev-auth-token-that-is-long-enough";
-      const layerInitial = yield* makeDiskSessionStoreLayer(baseDir, oldToken);
-      const old = yield* Effect.gen(function* () {
-        const sessions = yield* SessionStore.SessionStore;
-        const dev = yield* sessions.verify(oldToken);
-        const ticket = yield* sessions.issueWebSocketToken(dev.sessionId);
-        return { dev, ticket };
-      }).pipe(Effect.provide(layerInitial), Effect.scoped);
+  it.effect.each(["devAuthToken", "authToken"] as const)(
+    "invalidates old %s credentials and tickets after rotation or removal",
+    (tokenField) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-dev-auth-rotation-" });
+        const oldToken = "old-reusable-dev-auth-token-that-is-long-enough";
+        const newToken = "new-reusable-dev-auth-token-that-is-long-enough";
+        const layerInitial = yield* makeDiskSessionStoreLayer(baseDir, oldToken, tokenField);
+        const old = yield* Effect.gen(function* () {
+          const sessions = yield* SessionStore.SessionStore;
+          const dev = yield* sessions.verify(oldToken);
+          const ticket = yield* sessions.issueWebSocketToken(dev.sessionId);
+          return { dev, ticket };
+        }).pipe(Effect.provide(layerInitial), Effect.scoped);
 
-      const layerRotated = yield* makeDiskSessionStoreLayer(baseDir, newToken);
-      const rotated = yield* Effect.gen(function* () {
-        const sessions = yield* SessionStore.SessionStore;
-        expect((yield* Effect.flip(sessions.verify(oldToken)))._tag).toBe(
-          "MalformedSessionTokenError",
-        );
-        expect((yield* Effect.flip(sessions.verifyWebSocketToken(old.ticket.token)))._tag).toBe(
-          "UnknownWebSocketSessionError",
-        );
-        expect(
-          (yield* sessions.listActive()).some((row) => row.sessionId === old.dev.sessionId),
-        ).toBe(true);
-        const dev = yield* sessions.verify(newToken);
-        const ticket = yield* sessions.issueWebSocketToken(dev.sessionId);
-        return { dev, ticket };
-      }).pipe(Effect.provide(layerRotated), Effect.scoped);
+        const layerRotated = yield* makeDiskSessionStoreLayer(baseDir, newToken, tokenField);
+        const rotated = yield* Effect.gen(function* () {
+          const sessions = yield* SessionStore.SessionStore;
+          expect((yield* Effect.flip(sessions.verify(oldToken)))._tag).toBe(
+            "MalformedSessionTokenError",
+          );
+          expect((yield* Effect.flip(sessions.verifyWebSocketToken(old.ticket.token)))._tag).toBe(
+            "UnknownWebSocketSessionError",
+          );
+          expect(
+            (yield* sessions.listActive()).some((row) => row.sessionId === old.dev.sessionId),
+          ).toBe(true);
+          const dev = yield* sessions.verify(newToken);
+          const ticket = yield* sessions.issueWebSocketToken(dev.sessionId);
+          return { dev, ticket };
+        }).pipe(Effect.provide(layerRotated), Effect.scoped);
 
-      const layerRemoved = yield* makeDiskSessionStoreLayer(baseDir);
-      yield* Effect.gen(function* () {
-        const sessions = yield* SessionStore.SessionStore;
-        expect((yield* Effect.flip(sessions.verify(newToken)))._tag).toBe(
-          "MalformedSessionTokenError",
-        );
-        expect((yield* Effect.flip(sessions.verifyWebSocketToken(rotated.ticket.token)))._tag).toBe(
-          "UnknownWebSocketSessionError",
-        );
-        expect(
-          (yield* sessions.listActive()).some((row) => row.sessionId === rotated.dev.sessionId),
-        ).toBe(true);
-      }).pipe(Effect.provide(layerRemoved), Effect.scoped);
-    }),
+        const layerRemoved = yield* makeDiskSessionStoreLayer(baseDir, undefined, tokenField);
+        yield* Effect.gen(function* () {
+          const sessions = yield* SessionStore.SessionStore;
+          expect((yield* Effect.flip(sessions.verify(newToken)))._tag).toBe(
+            "MalformedSessionTokenError",
+          );
+          expect(
+            (yield* Effect.flip(sessions.verifyWebSocketToken(rotated.ticket.token)))._tag,
+          ).toBe("UnknownWebSocketSessionError");
+          expect(
+            (yield* sessions.listActive()).some((row) => row.sessionId === rotated.dev.sessionId),
+          ).toBe(true);
+        }).pipe(Effect.provide(layerRemoved), Effect.scoped);
+      }),
   );
 
   it.effect("carries a runtime-mode ceiling only on sessions issued with one", () =>

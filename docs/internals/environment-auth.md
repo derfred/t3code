@@ -124,6 +124,14 @@ back to the reusable credential. OAuth exchanges create ordinary local bearer
 or DPoP children with normal expiry and revocation. The reusable cookie expires
 after 30 days.
 
+### Configured auth token
+
+`--auth-token-file` (`T3CODE_AUTH_TOKEN_FILE`) seeds the same kind of hashed
+record as the reusable dev credential, in any mode, but as a bearer credential
+only: no cookie and no bootstrap exchange. Both share
+[ConfiguredSessionTokens](../../apps/server/src/auth/ConfiguredSessionTokens.ts),
+so revocation, rotation, and ticket invalidation behave the same way.
+
 ## The environment is the filesystem boundary
 
 Projects are organizational boundaries, not filesystem sandboxes.
