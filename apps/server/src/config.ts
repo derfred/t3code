@@ -94,6 +94,8 @@ export class ServerConfig extends Context.Service<
     readonly devAuthToken?: Redacted.Redacted<string> | undefined;
     /** Read from --auth-token-file at startup; a bearer credential with standard scopes. */
     readonly authToken?: Redacted.Redacted<string> | undefined;
+    /** Where authToken came from; SessionStore re-reads it when it changes. */
+    readonly authTokenFile?: string | undefined;
     readonly devAllowedOrigins: ReadonlyArray<string>;
     readonly noBrowser: boolean;
     readonly startupPresentation: StartupPresentation;

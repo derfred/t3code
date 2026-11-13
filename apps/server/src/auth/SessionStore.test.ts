@@ -62,6 +62,7 @@ const makeDiskSessionStoreLayer = Effect.fn("makeDiskSessionStoreLayer")(functio
   baseDir: string,
   token?: string,
   tokenField: "devAuthToken" | "authToken" = "devAuthToken",
+  authTokenFile?: string,
 ) {
   const devUrl = new URL("http://127.0.0.1:5173");
   const paths = yield* ServerConfig.deriveServerPaths(baseDir, devUrl, {
@@ -80,6 +81,7 @@ const makeDiskSessionStoreLayer = Effect.fn("makeDiskSessionStoreLayer")(functio
         mode: "web",
         devUrl,
         ...(token === undefined ? {} : { [tokenField]: Redacted.make(token) }),
+        ...(authTokenFile === undefined ? {} : { authTokenFile }),
       }),
     ),
   );
@@ -297,6 +299,51 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("SessionStore.lay
         expect((yield* Effect.flip(sessions.verify(token)))._tag).toBe("SessionTokenRevokedError");
       }).pipe(Effect.provide(layerReopenedA), Effect.scoped);
     }),
+  );
+
+  it.effect(
+    "rotates the --auth-token-file token when the file changes, ignoring bad contents",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-auth-token-reload-" });
+        const tokenDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-auth-token-file-" });
+        const tokenFile = `${tokenDir}/token`;
+        const oldToken = "old-configured-auth-token-that-is-long-enough";
+        const newToken = "new-configured-auth-token-that-is-long-enough";
+        yield* fs.writeFileString(tokenFile, `${oldToken}\n`);
+        const layer = yield* makeDiskSessionStoreLayer(baseDir, oldToken, "authToken", tokenFile);
+        yield* Effect.gen(function* () {
+          const sessions = yield* SessionStore.SessionStore;
+          const old = yield* sessions.verify(oldToken);
+          const oldTicket = yield* sessions.issueWebSocketToken(old.sessionId);
+
+          // Unchanged contents: nothing happens.
+          yield* sessions.reloadAuthTokenFile;
+          expect((yield* sessions.verify(oldToken)).sessionId).toBe(old.sessionId);
+
+          yield* fs.writeFileString(tokenFile, `${newToken}\n`);
+          yield* sessions.reloadAuthTokenFile;
+          const rotated = yield* sessions.verify(newToken);
+          expect(rotated.sessionId).not.toBe(old.sessionId);
+          expect((yield* Effect.flip(sessions.verify(oldToken)))._tag).toBe(
+            "MalformedSessionTokenError",
+          );
+          expect((yield* Effect.flip(sessions.verifyWebSocketToken(oldTicket.token)))._tag).toBe(
+            "UnknownWebSocketSessionError",
+          );
+          expect(
+            (yield* sessions.listActive()).some((row) => row.sessionId === old.sessionId),
+          ).toBe(false);
+
+          // A short or missing file keeps the current token.
+          yield* fs.writeFileString(tokenFile, "short");
+          yield* sessions.reloadAuthTokenFile;
+          yield* fs.remove(tokenFile);
+          yield* sessions.reloadAuthTokenFile;
+          expect((yield* sessions.verify(newToken)).sessionId).toBe(rotated.sessionId);
+        }).pipe(Effect.provide(layer), Effect.scoped);
+      }),
   );
 
   it.effect.each(["devAuthToken", "authToken"] as const)(

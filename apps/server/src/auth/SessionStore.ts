@@ -14,12 +14,15 @@ import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as Redacted from "effect/Redacted";
 
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -29,8 +32,11 @@ import * as ServerSecretStore from "./ServerSecretStore.ts";
 import {
   CONFIGURED_AUTH_TOKEN_SESSION_PREFIX,
   CONFIGURED_SESSION_EXPIRES_AT,
+  MIN_AUTH_TOKEN_LENGTH,
   REUSABLE_DEV_SESSION_PREFIX,
-  resolveConfiguredSessionTokens,
+  configuredAuthToken,
+  resolveReusableDevAuth,
+  type ConfiguredSessionToken,
 } from "./ConfiguredSessionTokens.ts";
 import {
   base64UrlDecodeUtf8,
@@ -422,6 +428,12 @@ export class SessionStore extends Context.Service<
     ) => Effect.Effect<number, SessionCredentialInternalError>;
     readonly markConnected: (sessionId: AuthSessionId) => Effect.Effect<void, never>;
     readonly markDisconnected: (sessionId: AuthSessionId) => Effect.Effect<void, never>;
+    /**
+     * Re-reads --auth-token-file. A new valid value replaces the configured
+     * token and revokes the old one; an unreadable or short one is ignored.
+     * Runs on its own when the file changes.
+     */
+    readonly reloadAuthTokenFile: Effect.Effect<void>;
   }
 >()("t3/auth/SessionStore") {}
 
@@ -493,6 +505,8 @@ function toAuthClientSession(input: Omit<AuthClientSession, "current">): AuthCli
 const make = Effect.gen(function* () {
   const random = yield* SecureRandom.SecureRandom;
   const serverConfig = yield* ServerConfig.ServerConfig;
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironmentIdentity;
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const authSessions = yield* AuthSessions.AuthSessionRepository;
@@ -514,9 +528,18 @@ const make = Effect.gen(function* () {
   } as const;
   const cookieName = resolveSessionCookieName(cookieInput);
   const legacyCookieName = resolveLegacySessionCookieName(cookieInput);
-  const configuredTokens = resolveConfiguredSessionTokens(serverConfig);
+  const devAuth = resolveReusableDevAuth(serverConfig);
+  // The --auth-token-file token changes at runtime (reloadAuthTokenFile); the dev token cannot.
+  const authTokenRef = yield* Ref.make(configuredAuthToken(serverConfig.authToken));
+  const configuredTokens = Ref.get(authTokenRef).pipe(
+    Effect.map((authToken) =>
+      [devAuth, authToken].filter((token): token is ConfiguredSessionToken => token !== undefined),
+    ),
+  );
   // createIfAbsent keeps a revoked record revoked across restarts; rotating the value issues a new one.
-  for (const configured of configuredTokens) {
+  const seed = Effect.fn("SessionStore.seedConfiguredToken")(function* (
+    configured: ConfiguredSessionToken,
+  ) {
     yield* authSessions
       .createIfAbsent({
         sessionId: configured.sessionId,
@@ -539,7 +562,8 @@ const make = Effect.gen(function* () {
           (cause) => new SessionCredentialIssueError({ sessionId: configured.sessionId, cause }),
         ),
       );
-  }
+  });
+  yield* Effect.forEach(yield* configuredTokens, seed, { discard: true });
 
   const emitUpsert = (clientSession: AuthClientSession) =>
     PubSub.publish(changesPubSub, {
@@ -753,7 +777,7 @@ const make = Effect.gen(function* () {
 
   const verify: SessionStore["Service"]["verify"] = Effect.fn("SessionStore.verify")(
     function* (token) {
-      const configured = configuredTokens.find((candidate) => candidate.matches(token));
+      const configured = (yield* configuredTokens).find((candidate) => candidate.matches(token));
       if (configured) {
         const row = yield* authSessions
           .getById({ sessionId: configured.sessionId })
@@ -907,7 +931,7 @@ const make = Effect.gen(function* () {
     if (
       (claims.sid.startsWith(REUSABLE_DEV_SESSION_PREFIX) ||
         claims.sid.startsWith(CONFIGURED_AUTH_TOKEN_SESSION_PREFIX)) &&
-      !configuredTokens.some((configured) => configured.sessionId === claims.sid)
+      !(yield* configuredTokens).some((configured) => configured.sessionId === claims.sid)
     ) {
       return yield* new UnknownWebSocketSessionError({ sessionId: claims.sid });
     }
@@ -1105,6 +1129,38 @@ const make = Effect.gen(function* () {
     );
   });
 
+  const reloadAuthTokenFile = Effect.gen(function* () {
+    const filePath = serverConfig.authTokenFile;
+    if (filePath === undefined) return;
+    const contents = yield* fs.readFileString(filePath).pipe(Effect.option);
+    const token = Option.map(contents, (text) => text.trim());
+    if (Option.isNone(token) || token.value.length < MIN_AUTH_TOKEN_LENGTH) {
+      // Mid-rotation writes and a briefly missing file must not lock clients out.
+      yield* Effect.logWarning("Ignoring an unreadable or too short auth token file.", {
+        path: filePath,
+      });
+      return;
+    }
+    const next = configuredAuthToken(Redacted.make(token.value))!;
+    const previous = yield* Ref.get(authTokenRef);
+    if (previous?.sessionId === next.sessionId) return;
+    yield* seed(next);
+    yield* Ref.set(authTokenRef, next);
+    if (previous) yield* revoke(previous.sessionId);
+    yield* Effect.logInfo("Rotated the configured auth token.", { path: filePath });
+  }).pipe(Effect.ignoreCause({ log: true }), Effect.withSpan("SessionStore.reloadAuthTokenFile"));
+
+  // The directory, not the file: a Kubernetes Secret volume swaps a symlink
+  // (..data) rather than writing the file. Any event re-reads, and an
+  // unchanged value is a no-op, so the events' paths don't matter.
+  if (serverConfig.authTokenFile !== undefined) {
+    yield* fs.watch(path.dirname(serverConfig.authTokenFile)).pipe(
+      Stream.runForEach(() => reloadAuthTokenFile),
+      Effect.ignoreCause({ log: true }),
+      Effect.forkScoped,
+    );
+  }
+
   return SessionStore.of({
     cookieName,
     legacyCookieName,
@@ -1121,6 +1177,7 @@ const make = Effect.gen(function* () {
     revokeAllExcept,
     markConnected,
     markDisconnected,
+    reloadAuthTokenFile,
   });
 });
 
