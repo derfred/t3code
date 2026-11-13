@@ -148,7 +148,10 @@ credential never falls back to the reusable dev credential.
 dev credential, in any mode, but as a bearer credential only, with standard rather than
 administrative scopes: no cookie and no bootstrap exchange. Both share
 [ConfiguredSessionTokens](../../apps/server/src/auth/ConfiguredSessionTokens.ts), so revocation,
-rotation, and ticket invalidation behave the same way.
+rotation, and ticket invalidation behave the same way. Unlike the dev token it rotates at runtime:
+SessionStore watches the file's directory (Kubernetes Secret volumes swap a `..data` symlink rather
+than rewrite the file), and a new valid value revokes the old record. An unreadable or short value
+is ignored, so a half-written Secret can't lock clients out.
 
 ## The environment is the filesystem boundary
 

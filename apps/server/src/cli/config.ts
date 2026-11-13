@@ -23,6 +23,7 @@ import * as SchemaTransformation from "effect/SchemaTransformation";
 import { Argument, Flag } from "effect/cli";
 import * as CliError from "effect/cli/CliError";
 
+import { MIN_AUTH_TOKEN_LENGTH } from "../auth/ConfiguredSessionTokens.ts";
 import { readBootstrapEnvelope } from "../bootstrap.ts";
 import { resolveServiceLauncherMode } from "../cloud/serviceLauncherClient.ts";
 import * as ServerConfig from "../config.ts";
@@ -66,7 +67,7 @@ const bootstrapFdFlag = Flag.Int("bootstrap-fd").pipe(
 );
 const authTokenFileFlag = Flag.String("auth-token-file").pipe(
   Flag.withDescription(
-    "File holding a bearer token (at least 32 characters) that API clients such as a Kubernetes operator can use; read at startup (equivalent to T3CODE_AUTH_TOKEN_FILE).",
+    "File holding a bearer token (at least 32 characters) that API clients such as a Kubernetes operator can use; re-read when it changes (equivalent to T3CODE_AUTH_TOKEN_FILE).",
   ),
   Flag.optional,
 );
@@ -207,8 +208,6 @@ const DevAuthTokenConfig = Config.Redacted("T3CODE_DEV_AUTH_TOKEN").pipe(
   Config.map(Option.getOrUndefined),
 );
 
-const MIN_AUTH_TOKEN_LENGTH = 32;
-
 const readAuthTokenFile = Effect.fn("config.readAuthTokenFile")(function* (filePath: string) {
   const fs = yield* FileSystem.FileSystem;
   const resolvedPath = yield* expandHomePath(filePath.trim());
@@ -226,7 +225,7 @@ const readAuthTokenFile = Effect.fn("config.readAuthTokenFile")(function* (fileP
       cause: `The auth token in ${resolvedPath} must contain at least ${MIN_AUTH_TOKEN_LENGTH} characters.`,
     });
   }
-  return Redacted.make(token);
+  return { token: Redacted.make(token), path: resolvedPath };
 });
 
 export interface CliServerFlags {
@@ -357,7 +356,7 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
     normalizedFlags.authTokenFile,
     Option.fromUndefinedOr(env.authTokenFile),
   ).pipe(Option.filter((value) => value.trim().length > 0));
-  const authToken = Option.isSome(authTokenFile)
+  const authTokenSource = Option.isSome(authTokenFile)
     ? yield* readAuthTokenFile(authTokenFile.value)
     : undefined;
   const explicitBaseDir = resolveOptionPrecedence(
@@ -564,7 +563,9 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
     staticDir,
     devUrl,
     ...(devAuthToken === undefined ? {} : { devAuthToken }),
-    ...(authToken === undefined ? {} : { authToken }),
+    ...(authTokenSource === undefined
+      ? {}
+      : { authToken: authTokenSource.token, authTokenFile: authTokenSource.path }),
     devAllowedOrigins: env.devAllowedOrigins,
     noBrowser,
     startupPresentation,

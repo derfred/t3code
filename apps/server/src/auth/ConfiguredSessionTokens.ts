@@ -15,6 +15,7 @@ import type { ServerConfig } from "../config.ts";
 
 export const REUSABLE_DEV_SESSION_PREFIX = "dev-auth-";
 export const CONFIGURED_AUTH_TOKEN_SESSION_PREFIX = "auth-token-";
+export const MIN_AUTH_TOKEN_LENGTH = 32;
 // The database schema requires an expiry for a configured token with no normal session TTL.
 export const CONFIGURED_SESSION_EXPIRES_AT = DateTime.makeUnsafe("9999-12-31T23:59:59.999Z");
 
@@ -69,25 +70,17 @@ export function resolveReusableDevAuth(
 }
 
 /** Bearer-only, for headless clients such as a Kubernetes operator. */
-function resolveConfiguredAuthToken(
-  config: Pick<ServerConfig["Service"], "authToken">,
+export function configuredAuthToken(
+  token: Redacted.Redacted<string> | undefined,
 ): ConfiguredSessionToken | undefined {
-  if (config.authToken === undefined) {
+  if (token === undefined) {
     return undefined;
   }
-  return makeConfiguredSessionToken(config.authToken, {
+  return makeConfiguredSessionToken(token, {
     sessionIdPrefix: CONFIGURED_AUTH_TOKEN_SESSION_PREFIX,
     subject: "configured-auth-token",
     method: "bearer-access-token",
     scopes: AuthStandardClientScopes,
     label: "Configured auth token",
   });
-}
-
-export function resolveConfiguredSessionTokens(
-  config: Pick<ServerConfig["Service"], "mode" | "devUrl" | "devAuthToken" | "authToken">,
-): ReadonlyArray<ConfiguredSessionToken> {
-  return [resolveReusableDevAuth(config), resolveConfiguredAuthToken(config)].filter(
-    (token) => token !== undefined,
-  );
 }
