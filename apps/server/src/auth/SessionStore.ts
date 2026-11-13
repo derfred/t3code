@@ -1,6 +1,5 @@
 import {
   AuthSessionId,
-  AuthAdministrativeClientScopes,
   AuthStandardClientScopes,
   AuthEnvironmentScopes,
   type AuthClientMetadata,
@@ -32,10 +31,11 @@ import type {
 import * as PayloadSigner from "./PayloadSigner.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 import {
-  REUSABLE_DEV_SESSION_EXPIRES_AT,
+  CONFIGURED_AUTH_TOKEN_SESSION_PREFIX,
+  CONFIGURED_SESSION_EXPIRES_AT,
   REUSABLE_DEV_SESSION_PREFIX,
-  resolveReusableDevAuth,
-} from "./ReusableDevAuth.ts";
+  resolveConfiguredSessionTokens,
+} from "./ConfiguredSessionTokens.ts";
 import {
   base64UrlDecodeUtf8,
   base64UrlEncode,
@@ -579,16 +579,17 @@ const make = Effect.gen(function* () {
   } as const;
   const cookieName = resolveSessionCookieName(cookieInput);
   const legacyCookieName = resolveLegacySessionCookieName(cookieInput);
-  const devAuth = resolveReusableDevAuth(serverConfig);
-  if (devAuth) {
+  const configuredTokens = resolveConfiguredSessionTokens(serverConfig);
+  // createIfAbsent keeps a revoked record revoked across restarts; rotating the value issues a new one.
+  for (const configured of configuredTokens) {
     yield* authSessions
       .createIfAbsent({
-        sessionId: devAuth.sessionId,
-        subject: "reusable-dev-token",
-        scopes: AuthAdministrativeClientScopes,
-        method: "browser-session-cookie",
+        sessionId: configured.sessionId,
+        subject: configured.subject,
+        scopes: configured.scopes,
+        method: configured.method,
         client: {
-          label: "Reusable dev token",
+          label: configured.label,
           ipAddress: null,
           userAgent: null,
           deviceType: "unknown",
@@ -596,11 +597,11 @@ const make = Effect.gen(function* () {
           browser: null,
         },
         issuedAt: yield* DateTime.now,
-        expiresAt: REUSABLE_DEV_SESSION_EXPIRES_AT,
+        expiresAt: CONFIGURED_SESSION_EXPIRES_AT,
       })
       .pipe(
         Effect.mapError(
-          (cause) => new SessionCredentialIssueError({ sessionId: devAuth.sessionId, cause }),
+          (cause) => new SessionCredentialIssueError({ sessionId: configured.sessionId, cause }),
         ),
       );
   }
@@ -825,28 +826,29 @@ const make = Effect.gen(function* () {
 
   const verify: SessionStore["Service"]["verify"] = Effect.fn("SessionStore.verify")(
     function* (token) {
-      if (devAuth?.matches(token)) {
+      const configured = configuredTokens.find((candidate) => candidate.matches(token));
+      if (configured) {
         const row = yield* authSessions
-          .getById({ sessionId: devAuth.sessionId })
+          .getById({ sessionId: configured.sessionId })
           .pipe(
             Effect.mapError(
               (cause) =>
-                new SessionCredentialVerificationError({ sessionId: devAuth.sessionId, cause }),
+                new SessionCredentialVerificationError({ sessionId: configured.sessionId, cause }),
             ),
           );
         if (Option.isNone(row)) {
-          return yield* new UnknownSessionTokenError({ sessionId: devAuth.sessionId });
+          return yield* new UnknownSessionTokenError({ sessionId: configured.sessionId });
         }
         if (row.value.revokedAt !== null) {
           return yield* new SessionTokenRevokedError({
-            sessionId: devAuth.sessionId,
+            sessionId: configured.sessionId,
             revokedAt: row.value.revokedAt,
           });
         }
         const observedAt = yield* DateTime.now;
         if (row.value.expiresAt.epochMilliseconds <= observedAt.epochMilliseconds) {
           return yield* new SessionTokenExpiredError({
-            sessionId: devAuth.sessionId,
+            sessionId: configured.sessionId,
             expiresAt: row.value.expiresAt,
             observedAt,
           });
@@ -1098,7 +1100,11 @@ const make = Effect.gen(function* () {
     const claims = yield* decodeWebSocketClaims(base64UrlDecodeUtf8(encodedPayload)).pipe(
       Effect.mapError((cause) => new InvalidWebSocketTokenPayloadError({ cause })),
     );
-    if (claims.sid.startsWith(REUSABLE_DEV_SESSION_PREFIX) && claims.sid !== devAuth?.sessionId) {
+    if (
+      (claims.sid.startsWith(REUSABLE_DEV_SESSION_PREFIX) ||
+        claims.sid.startsWith(CONFIGURED_AUTH_TOKEN_SESSION_PREFIX)) &&
+      !configuredTokens.some((configured) => configured.sessionId === claims.sid)
+    ) {
       return yield* new UnknownWebSocketSessionError({ sessionId: claims.sid });
     }
 

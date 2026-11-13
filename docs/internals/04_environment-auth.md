@@ -142,6 +142,14 @@ Each environment hashes the value into its own database record and keeps indepen
 signing keys, and revocation state. Normal credentials always take precedence: a rejected normal
 credential never falls back to the reusable dev credential.
 
+### Configured auth token
+
+`--auth-token-file` (`T3CODE_AUTH_TOKEN_FILE`) seeds the same kind of hashed record as the reusable
+dev credential, in any mode, but as a bearer credential only, with standard rather than
+administrative scopes: no cookie and no bootstrap exchange. Both share
+[ConfiguredSessionTokens](../../apps/server/src/auth/ConfiguredSessionTokens.ts), so revocation,
+rotation, and ticket invalidation behave the same way.
+
 ## The environment is the filesystem boundary
 
 Projects are organizational boundaries, not filesystem sandboxes. `filesystem:read` permits reading

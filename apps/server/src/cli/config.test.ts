@@ -54,6 +54,7 @@ const minimalDesktopFlags = (baseDir: string) => ({
   tailscaleServeEnabled: Option.none<boolean>(),
   tailscaleServePort: Option.none<number>(),
   lan: Option.none<boolean>(),
+  authTokenFile: Option.none(),
 });
 
 const encodeDesktopBootstrap = Schema.encodeEffect(Schema.fromJsonString(DesktopBackendBootstrap));
@@ -346,6 +347,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         tailscaleServeEnabled: Option.none<boolean>(),
         tailscaleServePort: Option.none<number>(),
         lan: Option.none<boolean>(),
+        authTokenFile: Option.none(),
       };
       const layerConfig = ConfigProvider.layer(
         ConfigProvider.fromEnv({
@@ -391,6 +393,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         tailscaleServeEnabled: Option.none<boolean>(),
         tailscaleServePort: Option.none<number>(),
         lan: Option.none<boolean>(),
+        authTokenFile: Option.none(),
       };
       const layerConfig = ConfigProvider.layer(
         ConfigProvider.fromEnv({ env: { T3CODE_DEV_AUTH_TOKEN: secret } }),
@@ -413,6 +416,63 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
       expect(serialized).not.toContain(secret);
       expect(desktop.devAuthToken).toBeUndefined();
       expect(staticWeb.devAuthToken).toBeUndefined();
+    }),
+  );
+
+  it.effect("reads the auth token file from the flag before the env var", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const { join } = yield* Path.Path;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-cli-auth-token-" });
+      const flagFile = join(baseDir, "flag-token");
+      const envFile = join(baseDir, "env-token");
+      const shortFile = join(baseDir, "short-token");
+      yield* fs.writeFileString(flagFile, "  flag-auth-token-that-is-long-enough-to-use\n");
+      yield* fs.writeFileString(envFile, "env-auth-token-that-is-long-enough-to-use");
+      yield* fs.writeFileString(shortFile, "short-secret");
+      const flags = {
+        mode: Option.some("web" as const),
+        port: Option.some(8788),
+        host: Option.none<string>(),
+        baseDir: Option.some(baseDir),
+        cwd: Option.none<string>(),
+        devUrl: Option.none<URL>(),
+        noBrowser: Option.none<boolean>(),
+        bootstrapFd: Option.none<number>(),
+        autoBootstrapProjectFromCwd: Option.none<boolean>(),
+        logWebSocketEvents: Option.none<boolean>(),
+        tailscaleServeEnabled: Option.none<boolean>(),
+        tailscaleServePort: Option.none<number>(),
+        lan: Option.none<boolean>(),
+      };
+      const resolveWith = (env: Record<string, string>, authTokenFile = Option.none<string>()) =>
+        resolveServerConfig({ ...flags, authTokenFile }, Option.none()).pipe(
+          Effect.provide(
+            Layer.mergeAll(ConfigProvider.layer(ConfigProvider.fromEnv({ env })), NetService.layer),
+          ),
+        );
+
+      const fromFlag = yield* resolveWith(
+        { T3CODE_AUTH_TOKEN_FILE: envFile },
+        Option.some(flagFile),
+      );
+      const fromEnv = yield* resolveWith({ T3CODE_AUTH_TOKEN_FILE: envFile });
+      const unset = yield* resolveWith({});
+      const short = yield* Effect.flip(resolveWith({ T3CODE_AUTH_TOKEN_FILE: shortFile }));
+      const missing = yield* Effect.flip(
+        resolveWith({ T3CODE_AUTH_TOKEN_FILE: join(baseDir, "missing") }),
+      );
+
+      expect(fromFlag.authToken && Redacted.value(fromFlag.authToken)).toBe(
+        "flag-auth-token-that-is-long-enough-to-use",
+      );
+      expect(fromEnv.authToken && Redacted.value(fromEnv.authToken)).toBe(
+        "env-auth-token-that-is-long-enough-to-use",
+      );
+      expect(unset.authToken).toBeUndefined();
+      expect(String(short)).toContain("at least 32 characters");
+      expect(String(short)).not.toContain("short-secret");
+      expect(String(missing)).toContain("Cannot read the auth token file");
     }),
   );
 
@@ -447,6 +507,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
           lan: Option.none(),
+          authTokenFile: Option.none(),
         },
         Option.none(),
       ).pipe(
@@ -524,6 +585,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
           lan: Option.none(),
+          authTokenFile: Option.none(),
         },
         Option.some("Debug"),
       ).pipe(
@@ -672,6 +734,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
           lan: Option.none(),
+          authTokenFile: Option.none(),
         },
         Option.none(),
       ).pipe(
@@ -721,6 +784,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
           lan: Option.none(),
+          authTokenFile: Option.none(),
         },
         Option.none(),
       ).pipe(
@@ -762,6 +826,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
           lan: Option.none(),
+          authTokenFile: Option.none(),
         },
         Option.none(),
         {
@@ -825,6 +890,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
           lan: Option.none(),
+          authTokenFile: Option.none(),
         },
         Option.none(),
       ).pipe(
@@ -865,6 +931,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     tailscaleServeEnabled: Option.none<boolean>(),
     tailscaleServePort: Option.none<number>(),
     lan: Option.none<boolean>(),
+    authTokenFile: Option.none(),
   });
 
   it.effect("uses the same unbracketed IPv6 wildcard for port selection and startup", () =>
